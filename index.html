@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>BITYMI · LPIPS heatmaps</title>
+<style>
+  :root { --bg:#0e0f12; --panel:#181a20; --fg:#e8e8ec; --dim:#9a9ca6; --acc:#f0b060; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  #top { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; padding:8px 12px; background:var(--panel); border-bottom:1px solid #2a2d36; }
+  #top label { color:var(--dim); font-size:12px; }
+  select,button { background:#23262f; color:var(--fg); border:1px solid #363a46; border-radius:6px; padding:5px 8px; font-size:13px; }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #info { color:var(--dim); font-size:12px; white-space:nowrap; }
+  #info b { color:var(--fg); }
+  #stage-wrap { position:absolute; top:52px; left:0; right:0; bottom:0; overflow:hidden; touch-action:none; cursor:grab; background:#000; }
+  #stage { position:absolute; left:0; top:0; transform-origin:0 0; will-change:transform; }
+  #stage img { position:absolute; left:0; top:0; display:block; user-select:none; -webkit-user-drag:none; image-rendering:auto; }
+  #divider { position:absolute; top:0; bottom:0; width:2px; background:#fff; box-shadow:0 0 0 1px rgba(0,0,0,.6); pointer-events:none; }
+  #handle { position:absolute; top:50%; width:34px; height:34px; margin:-17px 0 0 -17px; border-radius:50%; background:rgba(255,255,255,.92); color:#111; display:flex; align-items:center; justify-content:center; font-weight:700; cursor:ew-resize; touch-action:none; box-shadow:0 2px 8px rgba(0,0,0,.5); }
+  .tag { position:absolute; top:10px; padding:3px 8px; border-radius:5px; background:rgba(0,0,0,.65); font-size:12px; pointer-events:none; }
+  #tagL { left:10px; } #tagR { right:10px; }
+  #legend { position:absolute; left:10px; bottom:10px; background:rgba(0,0,0,.65); padding:6px 8px; border-radius:6px; font-size:11px; color:var(--dim); }
+  #bar { width:180px; height:10px; border-radius:3px; background:linear-gradient(90deg,#000004,#420a68,#932667,#dd513a,#fca50a,#fcffa4); margin:4px 0; }
+  #legend .ticks { display:flex; justify-content:space-between; }
+  #probe { position:absolute; right:10px; bottom:10px; background:rgba(0,0,0,.65); padding:6px 8px; border-radius:6px; font-size:12px; pointer-events:none; }
+  #probe b { color:var(--acc); }
+  #views { display:flex; gap:4px; }
+  #help { color:var(--dim); font-size:11px; margin-left:auto; }
+  @media (max-width:700px) { #help { display:none; } #info { white-space:normal; } }
+</style>
+</head>
+<body>
+<div id="top">
+  <label>Scene <select id="scene"></select></label>
+  <label>View <span id="views"></span></label>
+  <label>Left <select id="left"><option value="lpips">LPIPS heatmap</option><option value="render">Render</option><option value="gt">Ground truth</option></select></label>
+  <label>Right <select id="right"><option value="render">Render</option><option value="gt">Ground truth</option><option value="lpips">LPIPS heatmap</option></select></label>
+  <button id="swap" title="swap sides">⇄</button>
+  <button id="reset" title="reset zoom">1:1</button>
+  <span id="info"></span>
+  <span id="help">drag divider · drag image to pan · wheel / pinch to zoom · hover for value</span>
+</div>
+<div id="stage-wrap">
+  <div id="stage">
+    <img id="imgR" draggable="false">
+    <img id="imgL" draggable="false">
+  </div>
+  <div id="divider"><div id="handle">⇔</div></div>
+  <div class="tag" id="tagL"></div><div class="tag" id="tagR"></div>
+  <div id="legend"><div>spatial LPIPS (VGG) — per-pixel, mean = reported LPIPS</div><div id="bar"></div><div class="ticks"><span>0</span><span id="vmid"></span><span id="vmax"></span></div></div>
+  <div id="probe">hover: —</div>
+</div>
+<script>
+(async () => {
+  const $ = id => document.getElementById(id);
+  const man = await (await fetch('data/manifest.json?' + Date.now())).json();
+  const scenes = Object.entries(man.scenes).sort((a, b) => b[1].worst_lpips - a[1].worst_lpips);
+  const vmax = man.vmax;
+  $('vmax').textContent = vmax.toFixed(2); $('vmid').textContent = (vmax / 2).toFixed(2);
+  const sel = $('scene');
+  for (const [k, v] of scenes) {
+    const o = document.createElement('option'); o.value = k;
+    o.textContent = `${k}  · worst ${v.worst_lpips.toFixed(3)}  (mean ${v.mean_lpips.toFixed(3)})`;
+    sel.appendChild(o);
+  }
+  const wrap = $('stage-wrap'), stage = $('stage'), imgL = $('imgL'), imgR = $('imgR');
+  const NAMES = { lpips: 'LPIPS heatmap', render: 'Render (BITYMI)', gt: 'Ground truth' };
+  const FILES = { lpips: 'lpips.png', render: 'render.jpg', gt: 'gt.jpg' };
+  let cur = null, view = null, W = 1, H = 1;
+  let scale = 1, tx = 0, ty = 0, split = 0.5;      // split = screen fraction
+  let gray = null;                                   // ImageData of lpips_gray.png for hover read-out
+
+  function fit() {
+    const r = wrap.getBoundingClientRect();
+    scale = Math.min(r.width / W, r.height / H);
+    tx = (r.width - W * scale) / 2; ty = (r.height - H * scale) / 2;
+    apply();
+  }
+  function apply() {
+    stage.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`;
+    const r = wrap.getBoundingClientRect();
+    const sx = split * r.width;
+    $('divider').style.left = sx + 'px';
+    // clip the LEFT layer to the left of the screen split, in image space
+    const fracImg = Math.max(0, Math.min(1, (sx - tx) / (W * scale)));
+    imgL.style.clipPath = `inset(0 ${(1 - fracImg) * 100}% 0 0)`;
+  }
+  function setLayers() {
+    const l = $('left').value, rr = $('right').value;
+    const base = `data/${cur.dir}/${view.view}/`;
+    imgL.src = base + FILES[l]; imgR.src = base + FILES[rr];
+    $('tagL').textContent = NAMES[l]; $('tagR').textContent = NAMES[rr];
+  }
+  async function loadGray() {
+    gray = null;
+    const im = new Image(); im.src = `data/${cur.dir}/${view.view}/lpips_gray.png`;
+    await im.decode().catch(() => {});
+    if (!im.naturalWidth) return;
+    const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
+    const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(im, 0, 0);
+    gray = g.getImageData(0, 0, c.width, c.height);
+  }
+  function showScene(key, rank = 1) {
+    cur = man.scenes[key]; W = cur.width; H = cur.height;
+    view = cur.exported.find(e => e.rank === rank) || cur.exported[0];
+    stage.style.width = W + 'px'; stage.style.height = H + 'px';
+    imgL.width = W; imgL.height = H; imgR.width = W; imgR.height = H;
+    const vb = $('views'); vb.innerHTML = '';
+    for (const e of cur.exported) {
+      const b = document.createElement('button'); b.textContent = `#${e.rank} ${e.lpips.toFixed(3)}`;
+      b.title = e.view; b.className = e.rank === view.rank ? 'on' : '';
+      b.onclick = () => showScene(key, e.rank); vb.appendChild(b);
+    }
+    const rankAll = cur.views.findIndex(v => v.view === view.view) + 1;
+    $('info').innerHTML = `<b>${view.view}</b> · LPIPS <b>${view.lpips.toFixed(4)}</b> (rank ${rankAll}/${cur.n_views}, scene mean ${cur.mean_lpips.toFixed(4)}) · PSNR ${view.psnr.toFixed(2)} · map p99 ${view.map_p99.toFixed(2)} max ${view.map_max.toFixed(2)} · ${W}×${H}`;
+    setLayers(); loadGray(); fit();
+    history.replaceState(null, '', `#${encodeURIComponent(key)}/${view.rank}`);
+  }
+  sel.onchange = () => showScene(sel.value);
+  $('left').onchange = $('right').onchange = setLayers;
+  $('swap').onclick = () => { const l = $('left').value; $('left').value = $('right').value; $('right').value = l; setLayers(); };
+  $('reset').onclick = fit;
+  window.addEventListener('resize', fit);
+
+  // ---- interaction: divider drag, image pan, wheel / pinch zoom, hover probe ----
+  let mode = null, last = null, pinch = null;
+  const handle = $('handle');
+  handle.addEventListener('pointerdown', e => { mode = 'split'; handle.setPointerCapture(e.pointerId); e.stopPropagation(); e.preventDefault(); });
+  handle.addEventListener('pointermove', e => { if (mode !== 'split') return; const r = wrap.getBoundingClientRect(); split = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); apply(); });
+  handle.addEventListener('pointerup', () => { mode = null; });
+  const pts = new Map();
+  wrap.addEventListener('pointerdown', e => {
+    pts.set(e.pointerId, [e.clientX, e.clientY]); wrap.setPointerCapture(e.pointerId);
+    if (pts.size === 1) { mode = 'pan'; last = [e.clientX, e.clientY]; }
+    if (pts.size === 2) { const a = [...pts.values()]; pinch = { d: Math.hypot(a[0][0] - a[1][0], a[0][1] - a[1][1]), c: [(a[0][0] + a[1][0]) / 2, (a[0][1] + a[1][1]) / 2] }; mode = 'pinch'; }
+    e.preventDefault();
+  });
+  wrap.addEventListener('pointermove', e => {
+    if (pts.has(e.pointerId)) pts.set(e.pointerId, [e.clientX, e.clientY]);
+    if (mode === 'pan' && last) { tx += e.clientX - last[0]; ty += e.clientY - last[1]; last = [e.clientX, e.clientY]; apply(); }
+    else if (mode === 'pinch' && pts.size === 2) {
+      const a = [...pts.values()]; const d = Math.hypot(a[0][0] - a[1][0], a[0][1] - a[1][1]); const c = [(a[0][0] + a[1][0]) / 2, (a[0][1] + a[1][1]) / 2];
+      zoomAt(c[0], c[1], d / pinch.d); tx += c[0] - pinch.c[0]; ty += c[1] - pinch.c[1]; pinch = { d, c }; apply();
+    }
+    probe(e.clientX, e.clientY);
+  });
+  const end = e => { pts.delete(e.pointerId); if (pts.size === 0) { mode = null; last = null; pinch = null; } else if (pts.size === 1) { mode = 'pan'; last = [...pts.values()][0]; } };
+  wrap.addEventListener('pointerup', end); wrap.addEventListener('pointercancel', end);
+  function zoomAt(cx, cy, f) {
+    const r = wrap.getBoundingClientRect(); const px = cx - r.left, py = cy - r.top;
+    const ns = Math.max(0.05, Math.min(40, scale * f)); const k = ns / scale;
+    tx = px - (px - tx) * k; ty = py - (py - ty) * k; scale = ns;
+  }
+  wrap.addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015)); apply(); }, { passive: false });
+  wrap.addEventListener('dblclick', fit);
+  function probe(cx, cy) {
+    if (!gray) return;
+    const r = wrap.getBoundingClientRect();
+    const ix = Math.floor((cx - r.left - tx) / scale), iy = Math.floor((cy - r.top - ty) / scale);
+    if (ix < 0 || iy < 0 || ix >= gray.width || iy >= gray.height) { $('probe').textContent = 'hover: —'; return; }
+    const v = gray.data[(iy * gray.width + ix) * 4] / 255 * vmax;
+    $('probe').innerHTML = `px (${ix}, ${iy}) · LPIPS <b>${v.toFixed(3)}</b>`;
+  }
+  const h = decodeURIComponent(location.hash.slice(1)); const [hk, hr] = h.split('/');
+  if (hk && man.scenes[hk]) { sel.value = hk; showScene(hk, +hr || 1); } else showScene(scenes[0][0]);
+})();
+</script>
+</body>
+</html>
