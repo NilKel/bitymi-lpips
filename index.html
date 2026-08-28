@@ -41,9 +41,10 @@
 <div id="top">
   <label>Scene <select id="scene"></select></label>
   <label>View <span id="views"></span></label>
-  <label>Left <select id="left"><option value="lpips">LPIPS heatmap</option><option value="render">Render</option><option value="gt">Ground truth</option></select></label>
-  <label>Right <select id="right"><option value="render">Render</option><option value="gt">Ground truth</option><option value="lpips">LPIPS heatmap</option></select></label>
+  <label>Left <select id="left"></select></label>
+  <label>Right <select id="right"></select></label>
   <button id="swap" title="swap sides">⇄</button>
+  <button id="meth" title="swap Ours ↔ DBS in both layers">Ours ⇄ DBS</button>
   <button id="reset" title="reset zoom">1:1</button>
   <span id="info"></span>
   <span id="help">drag divider · drag image to pan · wheel / pinch to zoom · hover for value</span>
@@ -72,8 +73,23 @@
     sel.appendChild(o);
   }
   const wrap = $('stage-wrap'), stage = $('stage'), imgL = $('imgL'), imgR = $('imgR');
-  const NAMES = { lpips: 'LPIPS heatmap', render: 'Render (BITYMI)', gt: 'Ground truth' };
-  const FILES = { lpips: 'lpips.png', render: 'render.jpg', gt: 'gt.jpg' };
+  // Layers: ours (BITYMI) and any extra method the manifest carries (e.g. dbs =
+  // Beta-Splatting large), all on the SAME view, same GT, same colour scale.
+  const METHODS = { ours: 'BITYMI', dbs: 'Beta-Splatting (large)' };
+  const NAMES = { lpips: 'LPIPS · BITYMI', render: 'Render · BITYMI', gt: 'Ground truth',
+                  dbs_lpips: 'LPIPS · Beta-Splatting', dbs_render: 'Render · Beta-Splatting' };
+  const FILES = { lpips: 'lpips.png', render: 'render.jpg', gt: 'gt.jpg',
+                  dbs_lpips: 'dbs_lpips.png', dbs_render: 'dbs_render.jpg' };
+  const SWAP  = { lpips: 'dbs_lpips', render: 'dbs_render', dbs_lpips: 'lpips', dbs_render: 'render', gt: 'gt' };
+  function fillLayerSelects(hasDbs) {
+    for (const id of ['left', 'right']) {
+      const el = $(id); const prev = el.value; el.innerHTML = '';
+      const opts = hasDbs ? ['lpips', 'dbs_lpips', 'render', 'dbs_render', 'gt'] : ['lpips', 'render', 'gt'];
+      for (const k of opts) { const o = document.createElement('option'); o.value = k; o.textContent = NAMES[k]; el.appendChild(o); }
+      el.value = opts.includes(prev) ? prev : (id === 'left' ? 'lpips' : (hasDbs ? 'dbs_lpips' : 'render'));
+    }
+    $('meth').style.display = hasDbs ? '' : 'none';
+  }
   let cur = null, view = null, W = 1, H = 1;
   let scale = 1, tx = 0, ty = 0, split = 0.5;      // split = screen fraction
   let gray = null;                                   // ImageData of lpips_gray.png for hover read-out
@@ -101,7 +117,11 @@
   }
   async function loadGray() {
     gray = null;
-    const im = new Image(); im.src = `data/${cur.dir}/${view.view}/lpips_gray.png`;
+    // hover read-out follows whichever LPIPS layer is on the LEFT (else ours)
+    const l = $('left').value, rr = $('right').value;
+    const src = (l === 'dbs_lpips' || (l !== 'lpips' && rr === 'dbs_lpips')) ? 'dbs_lpips_gray.png' : 'lpips_gray.png';
+    $('probe').dataset.m = src.startsWith('dbs') ? 'Beta-Splatting' : 'BITYMI';
+    const im = new Image(); im.src = `data/${cur.dir}/${view.view}/${src}`;
     await im.decode().catch(() => {});
     if (!im.naturalWidth) return;
     const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
@@ -120,12 +140,18 @@
       b.onclick = () => showScene(key, e.rank); vb.appendChild(b);
     }
     const rankAll = cur.views.findIndex(v => v.view === view.view) + 1;
-    $('info').innerHTML = `<b>${view.view}</b> · LPIPS <b>${view.lpips.toFixed(4)}</b> (rank ${rankAll}/${cur.n_views}, scene mean ${cur.mean_lpips.toFixed(4)}) · PSNR ${view.psnr.toFixed(2)} · map p99 ${view.map_p99.toFixed(2)} max ${view.map_max.toFixed(2)} · ${W}×${H}`;
+    const dbsV = view.methods && view.methods.dbs; const dbsS = cur.methods && cur.methods.dbs;
+    fillLayerSelects(!!dbsV);
+    let info = `<b>${view.view}</b> · BITYMI LPIPS <b>${view.lpips.toFixed(4)}</b> (rank ${rankAll}/${cur.n_views}, scene mean ${cur.mean_lpips.toFixed(4)})`;
+    if (dbsV) info += ` · <span style="color:#7fd1b9">Beta-Splatting LPIPS <b>${dbsV.lpips.toFixed(4)}</b> (scene mean ${dbsS.mean_lpips.toFixed(4)})</span>`;
+    info += ` · PSNR ${view.psnr.toFixed(2)} · ${W}×${H}`;
+    $('info').innerHTML = info;
     setLayers(); loadGray(); fit();
     history.replaceState(null, '', `#${encodeURIComponent(key)}/${view.rank}`);
   }
   sel.onchange = () => showScene(sel.value);
-  $('left').onchange = $('right').onchange = setLayers;
+  $('left').onchange = $('right').onchange = () => { setLayers(); loadGray(); };
+  $('meth').onclick = () => { $('left').value = SWAP[$('left').value]; $('right').value = SWAP[$('right').value]; setLayers(); loadGray(); };
   $('swap').onclick = () => { const l = $('left').value; $('left').value = $('right').value; $('right').value = l; setLayers(); };
   $('reset').onclick = fit;
   window.addEventListener('resize', fit);
@@ -174,7 +200,7 @@
     const ix = Math.floor((cx - r.left - tx) / scale), iy = Math.floor((cy - r.top - ty) / scale);
     if (ix < 0 || iy < 0 || ix >= gray.width || iy >= gray.height) { $('probe').textContent = 'hover: —'; return; }
     const v = gray.data[(iy * gray.width + ix) * 4] / 255 * vmax;
-    $('probe').innerHTML = `px (${ix}, ${iy}) · LPIPS <b>${v.toFixed(3)}</b>`;
+    $('probe').innerHTML = `px (${ix}, ${iy}) · LPIPS <b>${v.toFixed(3)}</b> <span style="opacity:.7">${$('probe').dataset.m || ''}</span>`;
   }
   const h = decodeURIComponent(location.hash.slice(1)); const [hk, hr] = h.split('/');
   if (hk && man.scenes[hk]) { sel.value = hk; showScene(hk, +hr || 1); } else showScene(scenes[0][0]);
