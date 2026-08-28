@@ -19,7 +19,12 @@
   #stage { position:absolute; left:0; top:0; transform-origin:0 0; will-change:transform; }
   #stage img { position:absolute; left:0; top:0; display:block; user-select:none; -webkit-user-drag:none; image-rendering:auto; }
   #divider { position:absolute; top:0; bottom:0; width:2px; background:#fff; box-shadow:0 0 0 1px rgba(0,0,0,.6); pointer-events:none; }
-  #handle { position:absolute; top:50%; width:34px; height:34px; margin:-17px 0 0 -17px; border-radius:50%; background:rgba(255,255,255,.92); color:#111; display:flex; align-items:center; justify-content:center; font-weight:700; cursor:ew-resize; touch-action:none; box-shadow:0 2px 8px rgba(0,0,0,.5); }
+  /* Hit column for the split: the whole line is draggable, not just the knob.
+     pointer-events:auto is REQUIRED here — it sits inside #divider, whose
+     pointer-events:none would otherwise be inherited and every drag would fall
+     through to the image pan (the split then looks "stuck in the middle"). */
+  #dividerHit { position:absolute; top:0; bottom:0; width:28px; margin-left:-14px; pointer-events:auto; cursor:ew-resize; touch-action:none; }
+  #handle { position:absolute; top:50%; left:50%; width:36px; height:36px; margin:-18px 0 0 -18px; border-radius:50%; background:rgba(255,255,255,.92); color:#111; display:flex; align-items:center; justify-content:center; font-weight:700; pointer-events:auto; cursor:ew-resize; touch-action:none; box-shadow:0 2px 8px rgba(0,0,0,.5); }
   .tag { position:absolute; top:10px; padding:3px 8px; border-radius:5px; background:rgba(0,0,0,.65); font-size:12px; pointer-events:none; }
   #tagL { left:10px; } #tagR { right:10px; }
   #legend { position:absolute; left:10px; bottom:10px; background:rgba(0,0,0,.65); padding:6px 8px; border-radius:6px; font-size:11px; color:var(--dim); }
@@ -48,7 +53,7 @@
     <img id="imgR" draggable="false">
     <img id="imgL" draggable="false">
   </div>
-  <div id="divider"><div id="handle">⇔</div></div>
+  <div id="divider"><div id="dividerHit"><div id="handle">⇔</div></div></div>
   <div class="tag" id="tagL"></div><div class="tag" id="tagR"></div>
   <div id="legend"><div>spatial LPIPS (VGG) — per-pixel, mean = reported LPIPS</div><div id="bar"></div><div class="ticks"><span>0</span><span id="vmid"></span><span id="vmax"></span></div></div>
   <div id="probe">hover: —</div>
@@ -127,10 +132,17 @@
 
   // ---- interaction: divider drag, image pan, wheel / pinch zoom, hover probe ----
   let mode = null, last = null, pinch = null;
-  const handle = $('handle');
-  handle.addEventListener('pointerdown', e => { mode = 'split'; handle.setPointerCapture(e.pointerId); e.stopPropagation(); e.preventDefault(); });
-  handle.addEventListener('pointermove', e => { if (mode !== 'split') return; const r = wrap.getBoundingClientRect(); split = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); apply(); });
-  handle.addEventListener('pointerup', () => { mode = null; });
+  const hit = $('dividerHit');
+  const setSplit = e => { const r = wrap.getBoundingClientRect(); split = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); apply(); };
+  hit.addEventListener('pointerdown', e => { mode = 'split'; hit.setPointerCapture(e.pointerId); setSplit(e); e.stopPropagation(); e.preventDefault(); });
+  hit.addEventListener('pointermove', e => { if (mode !== 'split') return; setSplit(e); e.stopPropagation(); });
+  const endSplit = e => { if (mode === 'split') { mode = null; try { hit.releasePointerCapture(e.pointerId); } catch {} } e.stopPropagation(); };
+  hit.addEventListener('pointerup', endSplit); hit.addEventListener('pointercancel', endSplit);
+  // Keyboard nudge for precision (← →), 1 % per press, 5 % with shift.
+  window.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    split = Math.max(0, Math.min(1, split + (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? 0.05 : 0.01))); apply(); e.preventDefault();
+  });
   const pts = new Map();
   wrap.addEventListener('pointerdown', e => {
     pts.set(e.pointerId, [e.clientX, e.clientY]); wrap.setPointerCapture(e.pointerId);
